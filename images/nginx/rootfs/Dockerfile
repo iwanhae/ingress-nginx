@@ -29,7 +29,7 @@ ENV LUA_PATH="/usr/local/share/luajit-2.1.0-beta3/?.lua;/usr/local/share/lua/5.1
 ENV LUA_CPATH="/usr/local/lib/lua/?/?.so;/usr/local/lib/lua/?.so;;"
 
 COPY --from=builder /usr/local /usr/local
-COPY --from=builder /usr/lib/libopentelemetry* /usr/local/lib
+COPY --from=builder /usr/lib/libopentelemetry* /usr/local/lib/
 COPY --from=builder /opt /opt
 COPY --from=builder /etc/nginx /etc/nginx
 
