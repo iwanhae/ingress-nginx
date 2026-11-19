@@ -1,9 +1,7 @@
-diff --git a/src/core/ngx_cycle.h b/src/core/ngx_cycle.h
-index c51b7ff..4c335b9 100644
 --- a/src/core/ngx_cycle.h
 +++ b/src/core/ngx_cycle.h
-@@ -22,9 +22,14 @@
- #define NGX_DEBUG_POINTS_ABORT  2
+@@ -25,9 +25,14 @@
+ #define HAVE_PRIVILEGED_PROCESS_PATCH   1
  
  
 +#define HAVE_INTERCEPT_ERROR_LOG_PATCH
@@ -17,8 +15,8 @@ index c51b7ff..4c335b9 100644
  
  struct ngx_shm_zone_s {
      void                     *data;
-@@ -75,6 +80,10 @@ struct ngx_cycle_s {
-     ngx_str_t                 prefix;
+@@ -86,6 +91,10 @@ struct ngx_cycle_s {
+     ngx_str_t                 error_log;
      ngx_str_t                 lock_file;
      ngx_str_t                 hostname;
 +
@@ -28,11 +26,9 @@ index c51b7ff..4c335b9 100644
  };
  
  
-diff --git a/src/core/ngx_log.c b/src/core/ngx_log.c
-index 8e9408d..ed9b11b 100644
 --- a/src/core/ngx_log.c
 +++ b/src/core/ngx_log.c
-@@ -112,6 +112,8 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
+@@ -112,6 +112,8 @@ ngx_log_error_core(ngx_uint_t level, ngx
      ngx_uint_t   wrote_stderr, debug_connection;
      u_char       errstr[NGX_MAX_ERROR_STR];
  
@@ -41,7 +37,7 @@ index 8e9408d..ed9b11b 100644
      last = errstr + NGX_MAX_ERROR_STR;
  
      p = ngx_cpymem(errstr, ngx_cached_err_log_time.data,
-@@ -153,6 +155,16 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
+@@ -153,6 +155,16 @@ ngx_log_error_core(ngx_uint_t level, ngx
          p = last - NGX_LINEFEED_SIZE;
      }
  
