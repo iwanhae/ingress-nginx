@@ -1,0 +1,265 @@
+name: Images (GHCR)
+
+# Fork-only workflow.
+#
+# Builds the NGINX base image and the controller images and publishes them to
+# the GitHub Container Registry of the repository owner:
+#
+#   ghcr.io/<owner>/ingress-nginx/nginx
+#   ghcr.io/<owner>/ingress-nginx/controller
+#   ghcr.io/<owner>/ingress-nginx/controller-chroot
+#
+# It authenticates with the automatically provided GITHUB_TOKEN, so it needs no
+# Docker Hub or GCP credentials. The upstream workflows are left untouched.
+#
+# Published tags:
+#   every run      sha-<commit>
+#   pull_request   pr-<number>
+#   push to main   the version from the image's TAG file
+#   manual run     the optional "tag" input
+#
+# Only linux/amd64 is built by default. Set the IMAGE_PLATFORMS repository
+# variable, or pass the "platforms" input to a manual run, to add more.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "charts/**"
+      - "test/**"
+      - "hack/**"
+
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "charts/**"
+      - "test/**"
+      - "hack/**"
+
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Comma-separated list of platforms to build, e.g. linux/amd64,linux/arm64"
+        type: string
+        default: "linux/amd64"
+      tag:
+        description: "Additional tag to publish"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nginx:
+    name: nginx
+    # PRs from other repositories do not get a token with write access.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      prefix: ${{ steps.info.outputs.prefix }}
+      sha: ${{ steps.info.outputs.sha }}
+      tags: ${{ steps.info.outputs.tags }}
+      platforms: ${{ steps.info.outputs.platforms }}
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Build the head of the PR, not the temporary merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Platforms and tag names
+        id: info
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DISPATCH_PLATFORMS: ${{ github.event.inputs.platforms }}
+          REPO_PLATFORMS: ${{ vars.IMAGE_PLATFORMS }}
+          EXTRA_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          platforms="${DISPATCH_PLATFORMS:-${REPO_PLATFORMS:-linux/amd64}}"
+          echo "PLATFORMS=${platforms}" >> "${GITHUB_ENV}"
+          echo "platforms=${platforms}" >> "${GITHUB_OUTPUT}"
+
+          echo "prefix=ghcr.io/${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
+
+          sha="$(git rev-parse --short=7 HEAD)"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+          tags="sha-${sha}"
+          case "${EVENT_NAME}" in
+            pull_request) tags="${tags},pr-${PR_NUMBER}" ;;
+            push) tags="${tags},$(cat images/nginx/TAG)" ;;
+            workflow_dispatch) [ -n "${EXTRA_TAG}" ] && tags="${tags},${EXTRA_TAG}" ;;
+          esac
+          echo "tags=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push
+        id: publish
+        env:
+          PREFIX: ${{ steps.info.outputs.prefix }}
+          TAGS: ${{ steps.info.outputs.tags }}
+          SHA: ${{ steps.info.outputs.sha }}
+        run: |
+          IFS=',' read -r -a tags <<< "${TAGS}"
+          image_args=()
+          for tag in "${tags[@]}"; do image_args+=(--tag "${PREFIX}/nginx:${tag}"); done
+
+          source_label="org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+
+          # Build and push are two commands, as in images/nginx/Makefile: the
+          # registry credentials are read when a command starts, so they cannot
+          # expire during a long build.
+          docker buildx build \
+            --platform "${PLATFORMS}" \
+            --cache-from type=gha,scope=nginx \
+            --cache-to type=gha,mode=max,scope=nginx \
+            --label "${source_label}" \
+            "${image_args[@]}" \
+            images/nginx/rootfs
+
+          docker buildx build \
+            --platform "${PLATFORMS}" \
+            --cache-from type=gha,scope=nginx \
+            --label "${source_label}" \
+            "${image_args[@]}" \
+            --push \
+            images/nginx/rootfs
+
+          digest="$(docker buildx imagetools inspect "${PREFIX}/nginx:sha-${SHA}" --format '{{json .Manifest.Digest}}')"
+          echo "digest=${digest//\"/}" >> "${GITHUB_OUTPUT}"
+
+  controller:
+    name: controller
+    needs: nginx
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PLATFORMS: ${{ needs.nginx.outputs.platforms }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Platforms and tag names
+        id: info
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PREFIX: ${{ needs.nginx.outputs.prefix }}
+          EXTRA_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          echo "prefix=${PREFIX}" >> "${GITHUB_OUTPUT}"
+
+          sha="$(git rev-parse --short=7 HEAD)"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+          tags="sha-${sha}"
+          case "${EVENT_NAME}" in
+            pull_request) tags="${tags},pr-${PR_NUMBER}" ;;
+            push) tags="${tags},$(cat TAG)" ;;
+            workflow_dispatch) [ -n "${EXTRA_TAG}" ] && tags="${tags},${EXTRA_TAG}" ;;
+          esac
+          echo "tags=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build controller binaries
+        env:
+          SHA: ${{ steps.info.outputs.sha }}
+        run: |
+          for platform in ${PLATFORMS//,/ }; do
+            arch="${platform#linux/}"
+            echo "Building the controller binaries for ${arch}"
+            ARCH="${arch}" COMMIT_SHA="git-${SHA}" make build
+          done
+
+      - name: Build and push images
+        id: publish
+        env:
+          PREFIX: ${{ steps.info.outputs.prefix }}
+          TAGS: ${{ steps.info.outputs.tags }}
+          SHA: ${{ steps.info.outputs.sha }}
+          NGINX_DIGEST: ${{ needs.nginx.outputs.digest }}
+        run: |
+          IFS=',' read -r -a tags <<< "${TAGS}"
+          controller_args=()
+          chroot_args=()
+          for tag in "${tags[@]}"; do
+            controller_args+=(--tag "${PREFIX}/controller:${tag}")
+            chroot_args+=(--tag "${PREFIX}/controller-chroot:${tag}")
+          done
+
+          build_args=(
+            --platform "${PLATFORMS}"
+            --cache-from type=gha,scope=controller
+            --cache-to type=gha,mode=max,scope=controller
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            --build-arg "BASE_IMAGE=${PREFIX}/nginx@${NGINX_DIGEST}"
+            --build-arg "VERSION=$(cat TAG)"
+            --build-arg "COMMIT_SHA=git-${SHA}"
+            --build-arg "BUILD_ID=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          )
+
+          docker buildx build "${build_args[@]}" "${controller_args[@]}" --push rootfs
+          docker buildx build "${build_args[@]}" "${chroot_args[@]}" --push --file rootfs/Dockerfile-chroot rootfs
+
+      - name: Summary
+        env:
+          PREFIX: ${{ steps.info.outputs.prefix }}
+          TAGS: ${{ steps.info.outputs.tags }}
+          NGINX_TAGS: ${{ needs.nginx.outputs.tags }}
+        run: |
+          {
+            echo "### Published images"
+            echo ""
+            echo '```'
+            IFS=',' read -r -a tags <<< "${TAGS}"
+            for tag in "${tags[@]}"; do
+              echo "${PREFIX}/controller:${tag}"
+              echo "${PREFIX}/controller-chroot:${tag}"
+            done
+            IFS=',' read -r -a tags <<< "${NGINX_TAGS}"
+            for tag in "${tags[@]}"; do
+              echo "${PREFIX}/nginx:${tag}"
+            done
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
